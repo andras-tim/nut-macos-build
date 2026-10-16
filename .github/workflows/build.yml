@@ -34,6 +34,8 @@ jobs:
             rm -rf "build-$arch" && cp -R "nut-${NUT_VERSION}" "build-$arch"
             (
               cd "build-$arch"
+              # Empty pkg-config path: nothing may come from the runner's own Homebrew.
+              PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR=/var/empty \
               ./configure --host="$arch-apple-darwin" --build="$(uname -m)-apple-darwin" \
                 CC="clang -arch $arch" CXX="clang++ -arch $arch" \
                 --prefix="$PREFIX" --sysconfdir="$PREFIX/etc" \
@@ -43,6 +45,7 @@ jobs:
                 --without-ssl --without-usb --without-serial --without-snmp --without-neon --without-powerman \
                 --without-ipmi --without-avahi --without-modbus --without-gpio --without-cgi --without-doc \
                 --without-dev --without-nut_monitor --without-pynut --without-libltdl --without-wrap \
+                --without-upower --without-macosx_ups --without-linux_i2c --without-freeipmi --without-nutconf \
                 --with-drivers=dummy-ups
               make -j"$(sysctl -n hw.ncpu)"
               make install DESTDIR="$PWD/../stage-$arch"
@@ -51,6 +54,8 @@ jobs:
 
       - name: Merge into universal binaries
         run: |
+          diff <(cd stage-arm64 && find . | sort) <(cd stage-x86_64 && find . | sort) \
+            || { echo 'arm64 and x86_64 builds differ'; exit 1; }
           rm -rf stage && cp -R stage-arm64 stage
           find stage-arm64 -type f -perm -u+x | while read -r f; do
             rel="${f#stage-arm64/}"
