@@ -1,0 +1,86 @@
+name: build
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  NUT_VERSION: '2.8.5'
+  NUT_SHA256: '18bf32e59eb764b13da3c4fa70384926d7fa584cb31d2fe7f137a570633eeec1'
+  PREFIX: /opt/nut
+  MACOSX_DEPLOYMENT_TARGET: '12.0'
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch and verify the NUT source
+        run: |
+          curl -fsSLo nut.tar.gz "https://github.com/networkupstools/nut/releases/download/v${NUT_VERSION}/nut-${NUT_VERSION}.tar.gz"
+          echo "${NUT_SHA256}  nut.tar.gz" | shasum -a 256 -c -
+          tar xzf nut.tar.gz
+
+      # One configure per architecture, then lipo: autoconf tests do not cope with two -arch flags at once.
+      - name: Build arm64 and x86_64
+        run: |
+          for arch in arm64 x86_64; do
+            rm -rf "build-$arch" && cp -R "nut-${NUT_VERSION}" "build-$arch"
+            (
+              cd "build-$arch"
+              ./configure --host="$arch-apple-darwin" --build="$(uname -m)-apple-darwin" \
+                CC="clang -arch $arch" CXX="clang++ -arch $arch" \
+                --prefix="$PREFIX" --sysconfdir="$PREFIX/etc" \
+                --with-statepath="$PREFIX/var/state/ups" --with-pidpath="$PREFIX/var/run" \
+                --with-user=nobody --with-group=nobody \
+                --disable-shared --enable-static \
+                --without-ssl --without-usb --without-serial --without-snmp --without-neon --without-powerman \
+                --without-ipmi --without-avahi --without-modbus --without-gpio --without-cgi --without-doc \
+                --without-dev --without-nut_monitor --without-pynut --without-libltdl --without-wrap \
+                --with-drivers=dummy-ups
+              make -j"$(sysctl -n hw.ncpu)"
+              make install DESTDIR="$PWD/../stage-$arch"
+            )
+          done
+
+      - name: Merge into universal binaries
+        run: |
+          rm -rf stage && cp -R stage-arm64 stage
+          find stage-arm64 -type f -perm -u+x | while read -r f; do
+            rel="${f#stage-arm64/}"
+            if file "$f" | grep -q 'Mach-O'; then
+              lipo -create "$f" "stage-x86_64/$rel" -output "stage/$rel"
+            fi
+          done
+          mkdir -p "stage$PREFIX/var/state/ups" "stage$PREFIX/var/run"
+
+      - name: Check
+        run: |
+          for f in stage$PREFIX/sbin/upsmon stage$PREFIX/sbin/upssched stage$PREFIX/bin/upsc; do
+            lipo -archs "$f"; otool -L "$f" | tail -n +2
+          done
+          "stage$PREFIX/bin/upsc" -V
+
+      - name: Package
+        run: |
+          tar -C "stage$PREFIX" -czf "nut-${NUT_VERSION}-macos-universal.tar.gz" .
+          shasum -a 256 "nut-${NUT_VERSION}-macos-universal.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nut-macos-universal
+          path: nut-*-macos-universal.tar.gz
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" "nut-${NUT_VERSION}-macos-universal.tar.gz" --title "$GITHUB_REF_NAME"
+          --notes "NUT ${NUT_VERSION} client tools, universal (arm64 + x86_64), macOS 12+, prefix ${PREFIX}."
